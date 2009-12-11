@@ -1,11 +1,11 @@
 <?php
 /**
  * coreylib
- * Add universal web service parsing and view caching to your PHP project.
+ * Add universal Web service parsing and view caching to your PHP project.
  * @author Aaron Collegeman aaroncollegeman.com
- * @version 1.0.7 (beta): $Id: coreylib.php 139 2008-12-29 00:02:12Z acollegeman $
+ * @version 1.0.10 (beta): $Id: coreylib.php 139 2008-12-29 00:02:12Z acollegeman $
  *
- * Copyright (C)2008 Collegeman.net, LLC.
+ * Copyright (C)2008-2010 Collegeman.net, LLC.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,9 +29,350 @@
 
 define('COREYLIB_PARSER_XML', 'xml');
 //define('COREYLIB_PARSER_JSON', 'json');
-//define('COREYLIB_PARSER_CSV', 'csv');
+
+define('MASHUP_SORT_STRING', 'string');
+define('MASHUP_SORT_DATE', 'date');
 
 @include_once('coreylib-cfg.php');
+	
+class clMashup implements ArrayAccess, Iterator {
+	
+	private $spuds = array();
+	
+	private $fries = array();
+	
+	function __construct($items_at = null, $sort_by = null, $urls = array()) {
+		foreach($urls as $i => $url) {
+			$spud = new clSpud($i, new clAPI($url), $items_at, $sort_by);
+			$this->spuds[] = $spud;
+		}
+	}
+	
+	function add($source, clAPI $api, $items_at = null, $sort_by = null) {
+		$spud = new clSpud($source, $api, $items_at, $sort_by);
+		$this->spuds[] = $spud;
+		return $spud;
+	}
+	
+	function info() {
+		foreach($this->spuds as $s) 
+			$s->api()->info();
+	}
+	
+	function count() {
+		return count($this->fries);
+	}
+	
+	function parse($cacheFor = 0) {
+		$success = true;
+
+		$mh = curl_multi_init();
+		
+		$spuds_to_parse_now = array();
+		$curl_handles = array();
+		$queued_spuds = array();
+		
+		foreach($this->spuds as $i => $spud) {
+			$from_parser = $spud->api()->queue($cacheFor);
+			if (!is_string($from_parser)) {
+				// store reference to spud for later parsing
+				$url = curl_getinfo($from_parser, CURLINFO_EFFECTIVE_URL);
+				$key = md5($i.$url);
+				$queued_spuds[$key] = $spud;
+				$curl_handles[$i] = $from_parser;
+				
+				// queue in multi handle
+				curl_multi_add_handle($mh, $from_parser);
+			}
+			else {
+				$spud->api()->parseText($from_parser, true);
+				$spuds_to_parse_now[] = $spud;
+			}
+		}
+		
+		// go, go gadget, multi-curl!
+		$running = count($curl_handles);
+		curl_multi_exec($mh, $running); // doesn't block
+		
+		// before we start waiting for queued curl requests, parse the one's we had cached content for
+		foreach($spuds_to_parse_now as $spud) {
+			$this->makeFries($spud);
+		}
+		
+
+		// wait for curl to finish
+		if ($running > 0) {
+			do {
+				curl_multi_exec($mh, $running);
+			} while ($running > 0);
+		}
+		
+		foreach($curl_handles as $i => $ch) {
+			$key = md5($i.curl_getinfo($ch, CURLINFO_EFFECTIVE_URL));
+			$content = curl_multi_getcontent($ch);
+			$spud = $queued_spuds[$key];
+			$spud->api()->parseText($content, false);
+			$this->makeFries($spud);
+		}
+	}
+	
+	private function makeFries(clSpud $spud) {
+		if ($items_at = $spud->getItemsAt()) {
+			foreach($spud->api()->get($items_at) as $node) {
+				$this->fries[] = new clFry($spud, $node);
+			}
+		}
+	}
+	
+	function sort($order = 'descending', $type = MASHUP_SORT_DATE) {
+		$arr = array();
+	
+		foreach($this->fries as $fry) {
+			if ($sort_by = $fry->spud->getSortOn()) {
+				$key = ''.$fry->get($sort_by);
+				if ($type == MASHUP_SORT_DATE)
+					$key = date('c', strtotime($key));
+				
+				while(isset($arr[$key]))
+					$key .= 'a';
+				$arr[$key] = $fry;
+			}
+			else {
+				$key = 0;
+				while (isset($arr[$key]))
+					$key .= 'a';
+				$arr[$key] = $fry;
+			}
+		}
+		
+		if (preg_match('/desc.*/i', $order))
+			krsort($arr);
+		else
+			ksort($arr);
+		
+		$this->fries = array();
+	
+		$keys = array_keys($arr);
+		for($i=0; $i<count($keys); $i++)
+			$this->fries[] = $arr[$keys[$i]];
+	}
+
+	private $i = 0;
+
+	private $limit = null;
+
+	function limit($limit) {
+		$this->limit = $limit;
+		return $this;
+	}
+	
+	function clearLimit() {
+		$this->limit = null;
+		return $this;
+	}
+
+	function current() {
+		return $this->fries[$this->i];
+	}
+	
+	function key() {
+		return $this->i;
+	}
+	
+	function next() {
+		$this->i++;
+	}
+	
+	function rewind() {
+		$this->i = 0;
+	}
+	
+	function valid() {
+		return ($this->limit == null || ($this->i < $this->limit)) && isset($this->fries[$this->i]);
+	}
+	
+	function offsetExists($offset) {
+		return isset($this->fries[$offset]);
+	}
+	
+	function offsetGet($offset) {
+		return $this->fries[$offset];
+	}
+	
+	function offsetSet($offset, $value) {
+		throw new Exception("Mashups are read-only.");
+	}
+	
+	function offsetUnset($offset) {
+		throw new Exception("Mashups are read-only.");
+	}
+	
+} // end clMashup
+
+class clFry {
+	
+	public $spud;
+
+	public $api;
+	
+	public $node;
+	
+	public $source;
+	
+	function __construct(clSpud $spud, clNode $node) {
+		$this->source = $spud->source();
+		$this->api = $spud->api();
+		$this->spud = $spud;
+		$this->node = $node;
+	}	
+	
+	function get($path = null) {
+		return $this->node->get($path);
+	}
+	
+	function has($path = null) {
+		return $this->node->has($path);
+	}
+	
+	function info($path = null) {
+		return $this->node->info($path);
+	}
+	
+}
+
+class clSpud {
+	
+	private $api;
+	
+	private $source;
+	
+	private $sort_by;
+	
+	private $items_at;
+	
+	function __construct($source, clAPI $api, $items_at = null, $sort_by = null) {
+		$this->source = $source;
+		$this->api = $api;
+		$this->items_at = $items_at;
+		$this->sort_by = $sort_by;
+	}
+	
+	function source() {
+		return $this->source;
+	}
+	
+	function api() {
+		return $this->api;
+	}
+	
+	function sort_by($sort_by) {
+		$this->sort_by = $sort_by;
+		return $this;
+	}
+	
+	function items_at($items_at) {
+		$this->items_at = $items_at;
+		return $this;
+	}
+
+	function getItemsAt() {
+		return $this->items_at;
+	}
+	
+	function getSortOn() {
+		return $this->sort_by;
+	}
+
+}
+	
+/**
+ * Universal AWS ECS parser.
+ * @since 1.0.8
+ */
+class clAWSECS extends clAPI {
+	
+	private $aws_secret_key;
+	
+	private $aws_access_key_id;
+	
+	private $aws_service;
+	
+	private $aws_associate_tag;
+	
+	/**
+	 * @param String associate_tag The Amazon associate tag to associate with this request
+	 * @param String access_key_id Your public AWS access key
+	 * @param String secret_key Your private AWS secret key
+	 */
+	function __construct($associate_tag, $access_key_id, $secret_key, $service='AWSECommerceService') {
+		$this->aws_associate_tag = $associate_tag;
+		$this->aws_access_key_id = $access_key_id;
+		$this->aws_secret_key = $secret_key;
+		$this->aws_service = $service;
+		parent::__construct('http://ecs.amazonaws.com/onca/xml');
+	}
+	
+	function parse($cacheFor = 0) {
+		$this->signAWSECS();
+		return parent::parse($cacheFor);
+	}
+	
+	/**
+	 * Properly sign an AWS ECS request. Based on signature implementation by Blake Schwendiman.
+	 * @see http://www.thewhyandthehow.com/signing-aws-requests-in-php/
+	 */
+	private function signAWSECS() {
+		$url_parts = split('://', $this->url);
+		$host_and_path = split('/', $url_parts[1]);
+		$host = array_shift($host_and_path);
+		$path = '/'.join('/', $host_and_path);
+
+		// parameter defaults:
+		$params = array_merge(array(
+			'Operation' => 'ItemSearch',
+			'Service' => $this->aws_service,
+			'Version' => '2009-06-01',
+			'AWSAccessKeyId' => $this->aws_access_key_id,
+			'AssociateTag' => $this->aws_associate_tag
+		), $this->params);
+
+		if ($params['Operation'] == 'ItemSearch' && !isset($params['SearchIndex']))
+			$params['SearchIndex'] = 'Blended';
+
+		// next, override timestamp:
+		$params = array_merge($params, array(
+			'Timestamp' => gmdate('Y-m-d\TH:i:s\Z')
+		));
+
+		// do a case-insensitive, natural order sort on the array keys.
+		ksort($params);
+
+		// create the signable string
+		$temp = array();
+		foreach ($params as $k => $v) {
+			$temp[] = str_replace('%7E', '~', rawurlencode($k)) . '=' . str_replace('%7E', '~', rawurlencode($v));
+		}
+		$signable = join('&', $temp);
+
+		$stringToSign = strtoupper($this->method)."\n$host\n$path\n$signable";
+
+		$this->debug($stringToSign);
+		
+		// Hash the AWS secret key and generate a signature for the request.
+		$hex_str = hash_hmac('sha256', $stringToSign, $this->aws_secret_key);
+		$raw = '';
+		for ($i = 0; $i < strlen($hex_str); $i += 2) {
+			$raw .= chr(hexdec(substr($hex_str, $i, 2)));
+		}
+
+		$params['Signature'] = base64_encode($raw);
+
+		ksort($params);
+
+		$this->params = $params;
+	}
+	
+}
 	
 /**
  * Universal web service parser.
@@ -44,25 +385,35 @@ class clAPI {
 	
 	const METHOD_POST = 'post';
 	
-	private $params = array();
+	protected $params = array();
 	
-	private $username;
+	protected $username;
 	
-	private $password;
+	protected $password;
 	
-	private $content;
+	protected $content;
 	
-	private $parserType;
+	protected $parserType;
 	
-	private $parsed;
+	protected $parsed;
 	
-	private $url;
+	protected $url;
 	
-	private $sxml;
+	protected $sxml;
 	
-	private $tree;
+	protected $tree;
 	
-	private $method = self::METHOD_GET;
+	protected $method = self::METHOD_GET;
+	
+	protected $ch;
+	
+	protected $multi_mode = false;
+	
+	protected $cacheName;
+	
+	protected $cacheFor;
+	
+	protected $curlopts = array();
 	
 	public static $options = array(
 		"display_errors" => false,
@@ -172,36 +523,52 @@ class clAPI {
 		return join('&', $qs);	
 	}
 	
+	/**
+	 * @since 1.0.10
+	 */
+	public final function curlopt($constant, $value) {
+		$this->curlopts[$constant] = $value;
+		return $this;
+	}
+	
 	private function download($url) {
-		self::debug("Using curl to download <b>$this->url</b>");
+		self::debug(($this->multi_mode ? 'Queueing' : 'Downloading')." <b>$this->url</b>");
 		
 		$qs = $this->queryString();
 		$url = ($this->method == self::METHOD_GET ? $this->url.($qs ? '?'.$qs : '') : $this->url);
 		
-		$ch = curl_init($url);
+		$this->ch = curl_init($url);
 		
-		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-		curl_setopt($ch, CURLOPT_USERAGENT, 'coreylib');
+		curl_setopt($this->ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($this->ch, CURLOPT_USERAGENT, 'coreylib');
+	
+		// accept all SSL certificates:
+		curl_setopt($this->ch, CURLOPT_SSL_VERIFYPEER, false);
 		
 		if ($this->username && $this->password) 
-			curl_setopt($ch, CURLOPT_USERPWD, "$this->username:$this->password");
+			curl_setopt($this->ch, CURLOPT_USERPWD, "$this->username:$this->password");
 		
-		curl_setopt($ch, CURLOPT_HTTPHEADER, array('Expect:'));
+		curl_setopt($this->ch, CURLOPT_HTTPHEADER, array('Expect:'));
 		
 		if ($this->method == self::METHOD_POST) {
-			curl_setopt($ch, CURLOPT_POST, true);
-			curl_setopt($ch, CURLOPT_POSTFIELDS, $this->params);
+			curl_setopt($this->ch, CURLOPT_POST, true);
+			curl_setopt($this->ch, CURLOPT_POSTFIELDS, $this->params);
 		}
 		else
-			curl_setopt($ch, CURLOPT_HTTPGET, true);
+			curl_setopt($this->ch, CURLOPT_HTTPGET, true);
+			
+		foreach($this->curlopts as $const => $value) {
+			if ($const == CURLOPT_RETURNTRANSFER && $value != true) {
+				throw new Exception("Can't set CURL option CURLOPT_RETURNTRANSFER to false; that would break coreylib!");
+			}
+			curl_setopt($this->ch, $const, $value);
+		}
 		
-		return curl_exec($ch);
+		// in multi mode, we return the curl handle reference; otherwise, we execute and return content
+		return ($this->multi_mode ? $this->ch : curl_exec($this->ch));
 	}
 	
 	/**
-	 * 
-	 * @param $cacheFor
-	 * @return unknown_type
 	 * @since 1.0.6
 	 */
 	function post($cacheFor = 0) {
@@ -211,50 +578,118 @@ class clAPI {
 	
 	function parse($cacheFor = 0) {
 		$this->content = false;
+		$this->cacheFor = $cacheFor;
+		
 		$qs = $this->queryString();
 		$url = $this->url.($qs ? '?'.$qs : '');
-		$cacheName = $url.md5($this->username.$this->password);
+		$this->cacheName = $url.md5($this->username.$this->password);
+		
 		$contentCameFromCache = false;
 		
-		if ($cacheFor && !clAPI::$options['nocache']) 
-			$this->content = clCache::cached($cacheName, $cacheFor, true);
+		if ($this->cacheFor && !clAPI::$options['nocache']) 
+			$this->content = clCache::cached($this->cacheName, $this->cacheFor, true);
 			
 		if ($this->content === false) {
-			$try = 0;
-			do {
-				$try++;
-				$this->content = $this->download($url);
-			} while (empty($this->content) && $try < clAPI::$options['max_download_tries']);
+			if (!$this->multi_mode) {
+				$try = 0;
+				do {
+					$try++;
+					$this->content = $this->download($url);
+				} while (empty($this->content) && $try < clAPI::$options['max_download_tries']);
+			}
+			else {
+				// in multi mode, the curl handle is returned from download, not content
+				return $this->download($url);
+			}
 		}
-		else
-			$contentCameFromCache = true;
+		else {
+			// in multi mode, when content is cached, we return it
+			if ($this->multi_mode)
+				return $this->content;
+			else
+				$contentCameFromCache = true;
+		}
 
-			
+		return $this->parseText($this->content, $contentCameFromCache);
+	}
+	
+	/**
+	 * @since 1.0.9
+	 */
+	function parseText($content, $contentCameFromCache = false) {
+		$this->content = $content;
+		
 		if (!$this->content) {
-			self::error("Failed to download $this->url"); 
-			return false;
+			if ($this->ch) {
+				$message = curl_error($this->ch);
+				self::error("Failed to download $this->url<br /><small>$message</small>"); 
+				return false;
+			}
+			else {
+				self::error("Content queued from $this->url was null or empty.");
+				return false;
+			}
 		}
 		
 		if ($this->parserType == COREYLIB_PARSER_XML) {
 			if (!$this->sxml = simplexml_load_string($this->content, null, LIBXML_NOCDATA)) {
-				self::error("Failed to parse $this->url");
+				self::error("Failed to parse content.");
 				return false;
 			}
 			
 			$this->tree = new clNode($this->sxml);
 		}
 		
-		if ($cacheFor && !$contentCameFromCache && !clAPI::$options['nocache'])
-			clCache::saveContent($cacheName, $this->content, $cacheFor);
+		if ($this->cacheFor && !$contentCameFromCache && !clAPI::$options['nocache'])
+			clCache::saveContent($this->cacheName, $this->content, $this->cacheFor);
 		
 		return true;
 	}
 	
+	/**
+	 * @since 1.0.9
+	 */
+	function method($method) {
+		if ($method != clAPI::METHOD_POST && $method != clAPI::METHOD_GET)
+			throw new Exception("Unrecognized HTTP method: $method. Must be one clAPI::METHOD_POST and clAPI::METHOD_GET.");
+		return $this;
+	}
+	
+	/**
+	 * Sometimes there will be multi uses of coreylib in a single request.  In these cases
+	 * it may be helpful to use multi_curl to execute all HTTP requests in parallel. Calling
+	 * this method returns one of two values: the content, when content was in the cache, or
+	 * a curl handle reference in all other cases.
+	 * @return false or a curl handle - see description.
+	 * @since 1.0.9
+	 */
+	function queue($cacheFor = 0) {
+		$this->multi_mode = true;
+		return $this->parse($cacheFor);
+	}
+	
+	/**
+	 * @since 1.0.9
+	 */
+	function get_ch() {
+		return $this->ch;
+	}
+	
+	/**
+	 * @deprecated Use clAPI->flushCache instead.
+	 */
 	function flush() {
+		$this->flushCache();
+	}
+	
+	/**
+	 * @since 1.0.9
+	 */
+	function flushCache() {
 		$qs = $this->queryString();
 		$url = $this->url.($qs ? '?'.$qs : '');
-		$cacheName = $url.$this->username.$this->password;
-		clCache::flush($cacheName);	
+		$cacheName = $url.md5($this->username.$this->password);
+		clCache::flush($cacheName);
 	}
 	
 	function get($path = null, $limit = null, $forgive = false) {
