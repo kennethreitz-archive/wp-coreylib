@@ -15,5 +15,11 @@ Original coding by Aaron Collegeman.
  
 */
 
-require_once(dirname(__FILE__).DIRECTORY_SEPARATOR.'lib'.DIRECTORY_SEPARATOR.'coreylib.php'); 
-clAPI::configure('debug', false);
+try {
+	// Include coreylib, yo.
+	require_once(dirname(__FILE__).DIRECTORY_SEPARATOR.'lib'.DIRECTORY_SEPARATOR.'coreylib.php'); 
+	// No one wants to hear about that... 
+	clAPI::configure('debug', false);	
+} catch (Exception $e) {
+	// Just in case... :)
+}
