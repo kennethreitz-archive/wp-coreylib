@@ -3,7 +3,7 @@
  * coreylib
  * Add universal Web service parsing and view caching to your PHP project.
  * @author Aaron Collegeman aaroncollegeman.com
- * @version 1.0.10 (beta): $Id: coreylib.php 139 2008-12-29 00:02:12Z acollegeman $
+ * @version 1.1.1
  *
  * Copyright (C)2008-2010 Collegeman.net, LLC.
  *
@@ -637,7 +637,20 @@ class clAPI {
 				return false;
 			}
 			
-			$this->tree = new clNode($this->sxml);
+			//$this->sxml['xmlns'] = '';
+			
+			$default_ns = null;
+			if (count(array_keys($namespaces = $this->sxml->getNamespaces(true)))) {
+				// capture the default namespace
+				$default_ns = isset($namespaces['']) ? $namespaces[''] : null;
+			}
+			
+			if ($default_ns) {
+				$this->tree = new clNode($this->sxml, $namespaces, $this->sxml->getName(), $default_ns);
+			}
+			else {
+				$this->tree = new clNode($this->sxml);
+			}
 		}
 		
 		if ($this->cacheFor && !$contentCameFromCache && !clAPI::$options['nocache'])
@@ -699,6 +712,20 @@ class clAPI {
 			return $this->tree->get($path, $limit, $forgive);
 	}
 	
+	/**
+	 * @since 1.1.0
+	 */
+	function xpath($xpath, $limit = null) {
+		if ($this->tree === null)
+			self::error("Can't extra <b>$path</b> until you parse.");
+		else
+			return $this->tree->xpath($xpath, $limit);
+	}
+	
+	function first($xpath) {
+		return $this->xpath($xpath, 1);
+	}
+	
 	function info($path = null, $limit = null) {
 		if ($this->tree === null)
 			self::error("Can't get info until you parse.");
@@ -741,15 +768,19 @@ class clNode implements Iterator {
 	public $__value;
 	public $__children = array();
 	public $__attributes = array();
+	public $__default_ns = null;
+	public $__default_prefix = null;
 	
 	private $__position;
 	
-    function __construct(SimpleXMLElement $node = null, $namespaces = null) {
+    function __construct(SimpleXMLElement $node = null, $namespaces = null, $default_prefix = null, $default_ns = null) {
     	if ($node !== null) {
-		   	$this->__position = 0;
-	    	
+		
+			$this->__position = 0;
 			$this->__name = $node->getName();
 			$this->__value = $node;
+			$this->__default_ns = $default_ns;
+			$this->__default_prefix = $default_prefix;
 			
 			if ($namespaces === null)
 				$namespaces = $node->getNamespaces(true);
@@ -757,19 +788,17 @@ class clNode implements Iterator {
 			if ($namespaces === null)
 				$namespaces = array();
 	
-			$namespaces[''] = null;
-				
+	
 			foreach($namespaces as $ns => $uri) {
-				
 				clAPI::trace("Namespace $ns => $uri");
 				
-				foreach($node->children(($uri ? $uri : null)) as $child) {
+				foreach($node->children(($ns && $uri ? $uri : null)) as $child) {
 					$childName = ($ns ? "$ns:".$child->getName() : $child->getName());
 				
 					clAPI::trace("Child $childName");
 					
 					if (array_key_exists($childName, $this->__children) && is_array($this->__children[$childName])) {
-						$this->__children[$childName][] = new clNode($child, $namespaces);
+						$this->__children[$childName][] = new clNode($child, $namespaces, $default_prefix, $default_ns);
 					}
 					else if (array_key_exists($childName, $this->__children) && get_class($this->__children[$childName]) == "clNode") {
 						$childArray = array();
@@ -778,7 +807,7 @@ class clNode implements Iterator {
 						$this->__children[$childName] = $childArray;
 					}
 					else
-						$this->__children[$childName] = new clNode($child, $namespaces);
+						$this->__children[$childName] = new clNode($child, $namespaces, $default_prefix, $default_ns);
 				}
 				
 				foreach($node->attributes(($ns ? $ns : null)) as $a) {
@@ -802,6 +831,38 @@ class clNode implements Iterator {
 			return (0 >= $atLeast);	
 	}
 
+	/**
+	 * @since 1.1.0
+	 */
+	function xpath($xpath, $limit = null) {
+		if ($this->__default_ns && $this->__default_prefix) {
+			$this->__value->registerXPathNamespace($this->__default_prefix, $this->__default_ns);
+		}
+		
+		if (($elements = $this->__value->xpath($xpath)) !== false) {
+			if ($limit == 1 && count($elements) > 0)
+				return new clNode($elements[0]);
+			
+			$nodes = array();
+			foreach($elements as $i => $el) {
+				if ($limit != null && $i == $limit)
+					break;
+				$nodes[] = new clNode($el, null, $this->__default_prefix, $this->__default_ns);
+			}
+			return $nodes;
+		}
+		else {
+			return new clNode();
+		}
+	}
+	
+	/**
+	 * @since 1.1.0
+	 */
+	function first($xpath) {
+		return $this->xpath($xpath, 1);
+	}
+	
 	function get($path = null, $limit = null, $forgive = false) {
 		if ($path)
 			clAPI::trace("Searching for <b>&quot;$path&quot;</b>");	
@@ -906,20 +967,50 @@ class clNode implements Iterator {
 			?>	
 				<script type="text/javascript" src="http://ajax.googleapis.com/ajax/libs/jquery/1.2.6/jquery.min.js"></script>
 				<script type="text/javascript">
+					jQuery.noConflict();
 					function coreylib_toggle(a) {
-						$(a).parent().children('blockquote').toggle();
-						if ($(a).children('img').attr('src').match(/add.png$/))
-							$(a).children('img').attr('src', 'http://coreylib.googlecode.com/svn/trunk/docs/delete.png');
-						else if ($(a).children('img').attr('src').match(/delete.png$/))
-							$(a).children('img').attr('src', 'http://coreylib.googlecode.com/svn/trunk/docs/add.png');
+						a = jQuery(a);
+						a.parent().children('blockquote').toggle();
+						if (a.hasClass('open')) {
+							a.children('span:first').text('+'); 
+							a.removeClass('open');
+						}
+						else {
+							a.children('span:first').text('-');
+							a.addClass('open');
+						}
 					}
 				</script>
+				<style>
+					.coreylib blockquote {
+						background-color:#fff; color:black; border:1px solid black; padding: 10px; margin: 0px 0px 10px 0px;
+					}
+					.coreylib blockquote a {
+						font-weight:bold; text-decoration:none;
+					}
+					.coreylib blockquote blockquote {
+						padding: 0;
+						border: none;
+					}
+					.coreylib blockquote blockquote.hide {
+						display:none; margin: 0px 0px 0px 15px
+					}
+					.coreylib blockquote blockquote.show {
+						color:black; background-color:#fff; border: 1px solid black; padding:10px; margin:0px 0px 10px 0px;
+					}
+					.coreylib blockquote blockquote a {
+						width:20px;
+					}
+					.coreylib .att {
+						font-weight:bold; color:purple;
+					}
+				</style>
 			<?php
 			
 			self::$jqueryOut = true;
 		}
 		
-		if ($source) echo '<blockquote style="background-color:#fff; color:black; border:1px solid black; padding: 10px; margin: 0px 0px 10px 0px;"><a style="font-weight:bold; text-decoration:none;" href="javascript:;" onclick="coreylib_toggle(this);"><img src="http://coreylib.googlecode.com/svn/trunk/docs/add.png" border="0" /></a> '.$source;
+		if ($source) echo '<div class="coreylib"><blockquote><a href="javascript:;" onclick="coreylib_toggle(this);">[<span>+</span>]</a> '.$source;
 		
 		$node = $this->get($path, $limit);
 		if (is_array($node)) {
@@ -931,7 +1022,7 @@ class clNode implements Iterator {
 		else if ($node !== null)
 			echo "$path: $node";
 			
-		if ($source) echo '</blockquote>';
+		if ($source) echo '</blockquote></div>';
 		
 		return '';
 	}
@@ -940,9 +1031,9 @@ class clNode implements Iterator {
 		if (is_object($node)) {
 			$attributes = array();
 			foreach($node->__attributes as $n => $v) 
-				$attributes[] = "<span style=\"font-weight:bold; color:purple;\">$n</span>=&quot;".htmlentities($v)."&quot;";
+				$attributes[] = "<span class=\"att\">$n</span>=&quot;".htmlentities($v)."&quot;";
 			
-			echo '<blockquote style="'.($hide ? 'display:none; margin: 0px 0px 0px 15px' : 'color:black; background-color:#fff; border: 1px solid black; padding:10px; margin:0px 0px 10px 0px;').'">&lt;'.(count($node->__children) ? '<a style="font-weight:bold; text-decoration:none; width:20px;" href="javascript:;" onclick="coreylib_toggle(this);">'.$name.'</a>' : '<b>'.$name.'</b>').(count($attributes) ? ' '.join(' ', $attributes) : '').'&gt;';
+			echo '<blockquote class="'.($hide ? 'hide' : 'show').'">&lt;'.(count($node->__children) ? '<a href="javascript:;" onclick="coreylib_toggle(this);">'.$name.'</a>' : '<b>'.$name.'</b>').(count($attributes) ? ' '.join(' ', $attributes) : '').'&gt;';
 			echo htmlentities(trim($node->__value[0]));
 			foreach($node->__children as $childName => $child)
 				self::blockquote($childName, $child);
