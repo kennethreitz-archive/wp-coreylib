@@ -1,9 +1,9 @@
 So, Aaron Collegeman (http://aaroncollegeman.com) wrote Coreylib (http://coreylib.com). Kenneth Reitz  (http://kennethreitz.com) added this library to a folder, and called it a plugin.
 This is that plugin.  
 
-Installation Instructions:
+## Installation Instructions:
 
-   1) Copy this folder into : WP_HOME/plugins/
-   2) Wordpress Admin > Plugins > coreylib > activate
+   1. Copy this folder into : WP_HOME/plugins/
+   2. Wordpress Admin > Plugins > coreylib > activate
 
 You can now call clAPI from anywhere in your theme :)
