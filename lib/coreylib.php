@@ -3,7 +3,7 @@
  * coreylib
  * Add universal Web service parsing and view caching to your PHP project.
  * @author Aaron Collegeman aaroncollegeman.com
- * @version 1.1.1
+ * @version 1.1.2
  *
  * Copyright (C)2008-2010 Collegeman.net, LLC.
  *
@@ -632,7 +632,7 @@ class clAPI {
 		}
 		
 		if ($this->parserType == COREYLIB_PARSER_XML) {
-			if (!$this->sxml = simplexml_load_string($this->content, null, LIBXML_NOCDATA)) {
+			if (!($this->sxml = simplexml_load_string($this->content, 'SimpleXMLElement', LIBXML_NOCDATA))) {
 				self::error("Failed to parse content.");
 				return false;
 			}
@@ -788,15 +788,41 @@ class clNode implements Iterator {
 			if ($namespaces === null)
 				$namespaces = array();
 	
-	
-			foreach($namespaces as $ns => $uri) {
-				clAPI::trace("Namespace $ns => $uri");
+			if (count($namespaces)) {
+				foreach($namespaces as $ns => $uri) {
+					clAPI::trace("Namespace $ns => $uri");
 				
-				foreach($node->children(($ns && $uri ? $uri : null)) as $child) {
-					$childName = ($ns ? "$ns:".$child->getName() : $child->getName());
+					foreach($node->children(($ns && $uri ? $uri : null)) as $child) {
+						$childName = ($ns ? "$ns:".$child->getName() : $child->getName());
 				
-					clAPI::trace("Child $childName");
+						clAPI::trace("Child $childName");
 					
+						if (array_key_exists($childName, $this->__children) && is_array($this->__children[$childName])) {
+							$this->__children[$childName][] = new clNode($child, $namespaces, $default_prefix, $default_ns);
+						}
+						else if (array_key_exists($childName, $this->__children) && get_class($this->__children[$childName]) == "clNode") {
+							$childArray = array();
+							$childArray[] = $this->__children[$childName];
+							$childArray[] = new clNode($child, $namespaces);
+							$this->__children[$childName] = $childArray;
+						}
+						else
+							$this->__children[$childName] = new clNode($child, $namespaces, $default_prefix, $default_ns);
+					}
+				
+					foreach($node->attributes(($ns ? $ns : null)) as $a) {
+						$a = $a->asXML();
+						@list($name, $value) = split('=', $a);
+						$this->__attributes[trim($name)] = substr($value, 1, strlen($value)-2);
+					}
+				}
+			}
+			else {
+				foreach($node->children() as $child) {
+					$childName = $child->getName();
+			
+					clAPI::trace("Child $childName");
+				
 					if (array_key_exists($childName, $this->__children) && is_array($this->__children[$childName])) {
 						$this->__children[$childName][] = new clNode($child, $namespaces, $default_prefix, $default_ns);
 					}
@@ -809,8 +835,8 @@ class clNode implements Iterator {
 					else
 						$this->__children[$childName] = new clNode($child, $namespaces, $default_prefix, $default_ns);
 				}
-				
-				foreach($node->attributes(($ns ? $ns : null)) as $a) {
+			
+				foreach($node->attributes() as $a) {
 					$a = $a->asXML();
 					@list($name, $value) = split('=', $a);
 					$this->__attributes[trim($name)] = substr($value, 1, strlen($value)-2);
@@ -1413,6 +1439,10 @@ class clCache {
 	public static function save() {
 		$content = ob_get_flush();
 		self::saveContent(array_pop(self::$currentNameQueue), $content, 0);
+	}
+	
+	public static function cancel() {
+		echo ob_get_flush();
 	}
 
 	private static function isMysqlMode() {
