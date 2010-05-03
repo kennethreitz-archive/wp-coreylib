@@ -3,7 +3,7 @@
  * coreylib
  * Add universal Web service parsing and view caching to your PHP project.
  * @author Aaron Collegeman aaroncollegeman.com
- * @version 1.1.2
+ * @version 1.1.4
  *
  * Copyright (C)2008-2010 Collegeman.net, LLC.
  *
@@ -545,8 +545,10 @@ class clAPI {
 		// accept all SSL certificates:
 		curl_setopt($this->ch, CURLOPT_SSL_VERIFYPEER, false);
 		
-		if ($this->username && $this->password) 
+		if ($this->username && $this->password) {
+			curl_setopt($this->ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
 			curl_setopt($this->ch, CURLOPT_USERPWD, "$this->username:$this->password");
+		}
 		
 		curl_setopt($this->ch, CURLOPT_HTTPHEADER, array('Expect:'));
 		
@@ -1239,24 +1241,25 @@ class clCache {
 	private static function parseCacheFor($cacheFor) {
 		if (!is_numeric($cacheFor)) {
 			$original = trim($cacheFor);
-			
+	
 			$firstChar = substr($cacheFor, 0, 1);
-			if ($firstChar == "+")
+			if ($firstChar == "+") {
 				$cacheFor = '-'.substr($cacheFor, 1);
+			}
 			else if ($firstChar != "-") {
 				if (stripos($cacheFor, 'last') === false)
 					$cacheFor = '-'.$cacheFor;
 			}
-
-			if (($cacheFor = strtotime($cacheFor)) === false) {
+			
+			if (($cacheFor = strtotime(gmdate('c', strtotime($cacheFor)))) === false) {
 				clAPI::error("I don't understand $original as an expression of time.");
 				return false;
 			}
-			
+						
 			return $cacheFor;
 		}
 		else {
-			$cacheFor = time()-$cacheFor;
+			$cacheFor = strtotime(gmdate())-$cacheFor;
 			return $cacheFor;
 		}
 	}	
@@ -1289,7 +1292,7 @@ class clCache {
 			return false;
 		}
 			
-		$content = ($cacheFor < $fileAge) ? @file_get_contents($pathToFile) : false;
+		$content = ($cacheFor < strtotime(gmdate('c', $fileAge))) ? @file_get_contents($pathToFile) : false;
 		if ($content === false)
 			clAPI::debug("File cache <b>$fileName</b> was too old.");
 		else
@@ -1408,7 +1411,8 @@ class clCache {
 				return false;
 			else { 
 				$md5 = md5($name);
-				if (!@mysql_query("REPLACE INTO `".self::cacheTableName()."` (id, cached_on, content) VALUES ('$md5', NOW(), '".mysql_escape_string($content)."')", self::$mysqlConnection) && $error = mysql_error(self::$mysqlConnection)) {
+				$now = gmdate('Y/m/d H:i:s');
+				if (!@mysql_query("REPLACE INTO `".self::cacheTableName()."` (id, cached_on, content) VALUES ('$md5', '$now', '".mysql_escape_string($content)."')", self::$mysqlConnection) && $error = mysql_error(self::$mysqlConnection)) {
 					clAPI::error("Failed to cache <b>$md5</b>. See server error log for details.");
 					error_log("Failed to cache [$md5]: $error");
 					return false;
@@ -1442,7 +1446,7 @@ class clCache {
 	}
 	
 	public static function cancel() {
-		echo ob_get_flush();
+		ob_end_flush();
 	}
 
 	private static function isMysqlMode() {
