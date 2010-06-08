@@ -1,9 +1,9 @@
 <?php
 /**
  * coreylib
- * Add universal Web service parsing and view caching to your PHP project.
- * @author Aaron Collegeman aaroncollegeman.com
- * @version 1.1.4
+ * Parse and cache XML and JSON.
+ * @author Aaron Collegeman http://aaroncollegeman.com aaron@collegeman.net
+ * @version 1.1.5
  *
  * Copyright (C)2008-2010 Collegeman.net, LLC.
  *
@@ -22,267 +22,145 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA. 
  */
 
-// ----------------------------------------------------------------------------
-// Don't touch anything in this file.  That way when there's an update, you
-// can just overwrite this file with the new one.  Go ahead, we warned you!
-// ----------------------------------------------------------------------------
-
 define('COREYLIB_PARSER_XML', 'xml');
-//define('COREYLIB_PARSER_JSON', 'json');
-
+define('COREYLIB_PARSER_JSON', 'json');
 define('MASHUP_SORT_STRING', 'string');
 define('MASHUP_SORT_DATE', 'date');
 
 @include_once('coreylib-cfg.php');
 	
-class clMashup implements ArrayAccess, Iterator {
+/**
+ * oAuth support class for signing requests to oAuth-protected Web services.
+ * Based on the implementation of oAuth 1.0 in EpiOAuth 
+ * @see http://github.com/jmathai/twitter-async/blob/master/EpiOAuth.php
+ * @since 1.1.5
+ */
+class oAuthSupport {
 	
-	private $spuds = array();
+	private $consumer_secret;
+	private $access_token_secret;
+	private $signature_method;
+	private $signature;
+	private $header_content;
+	private $url;
 	
-	private $fries = array();
+	function __construct($url, $consumer_key, $consumer_secret, $access_token, $access_token_secret, &$params = null, $method = 'POST', $signature_method = 'HMAC-SHA1') {
+	    
+		$this->url = $url;
+		$this->consumer_secret = $consumer_secret;
+		$this->access_token_secret = $access_token_secret;
+		$this->signature_method = $signature_method;
 	
-	function __construct($items_at = null, $sort_by = null, $urls = array()) {
-		foreach($urls as $i => $url) {
-			$spud = new clSpud($i, new clAPI($url), $items_at, $sort_by);
-			$this->spuds[] = $spud;
-		}
-	}
-	
-	function add($source, clAPI $api, $items_at = null, $sort_by = null) {
-		$spud = new clSpud($source, $api, $items_at, $sort_by);
-		$this->spuds[] = $spud;
-		return $spud;
-	}
-	
-	function info() {
-		foreach($this->spuds as $s) 
-			$s->api()->info();
-	}
-	
-	function count() {
-		return count($this->fries);
-	}
-	
-	function parse($cacheFor = 0) {
-		$success = true;
-
-		$mh = curl_multi_init();
+		$oauth = array();
 		
-		$spuds_to_parse_now = array();
-		$curl_handles = array();
-		$queued_spuds = array();
+	    $oauth['oauth_consumer_key'] = $consumer_key;
+	    $oauth['oauth_token'] = $access_token;
+	    $oauth['oauth_nonce'] = md5(uniqid(rand(), TRUE));
+	    $oauth['oauth_timestamp'] = time();
+	    $oauth['oauth_signature_method'] = $signature_method;
+	
+	    if (isset($params['oauth_verifier'])) {
+	    	$oauth['oauth_verifier'] = $params['oauth_verifier'];
+	      	unset($params['oauth_verifier']);
+	    }
+	
+	    $oauth['oauth_version'] = '1.0';
+	
+	    // encode all oauth values
+	    foreach($oauth as $k => $v)
+	      	$oauth[$k] = self::encode_rfc3986($v);
+ 
+	    $sig_params = array();
+	    $has_file = FALSE;
+
+	    foreach(((array) $params) as $k => $v) {
+	        if (strncmp('@', $k, 1) !== 0) {
+	          	$sig_params[$k] = self::encode_rfc3986($v);
+	          	$params[$k] = self::encode_rfc3986($v);
+	        }
+	        else {
+	          	$params[substr($k, 1)] = $v;
+	          	unset($params[$k]);
+	          	$has_file = TRUE;
+	        }
+	    }
+
+		if ($has_file === TRUE)
+	        $sig_params = array();
+
+	    $sig_params = array_merge($oauth, (array) $sig_params);
+
+	    // sort 
+	    ksort($sig_params);
+
+		// sign
+		$param_string = self::encode_rfc3986(self::build_http_query_raw($sig_params));
+	 	$normalized_url = self::encode_rfc3986(self::normalize_url($url));
+		$method = self::encode_rfc3986($method);
+	    $signature_base_string = "{$method}&{$normalized_url}&{$param_string}";
 		
-		foreach($this->spuds as $i => $spud) {
-			$from_parser = $spud->api()->queue($cacheFor);
-			if (!is_string($from_parser)) {
-				// store reference to spud for later parsing
-				$url = curl_getinfo($from_parser, CURLINFO_EFFECTIVE_URL);
-				$key = md5($i.$url);
-				$queued_spuds[$key] = $spud;
-				$curl_handles[$i] = $from_parser;
-				
-				// queue in multi handle
-				curl_multi_add_handle($mh, $from_parser);
-			}
-			else {
-				$spud->api()->parseText($from_parser, true);
-				$spuds_to_parse_now[] = $spud;
-			}
-		}
+	 	$oauth['oauth_signature'] = self::encode_rfc3986($this->sign_string($signature_base_string));
 		
-		// go, go gadget, multi-curl!
-		$running = count($curl_handles);
-		curl_multi_exec($mh, $running); // doesn't block
-		
-		// before we start waiting for queued curl requests, parse the one's we had cached content for
-		foreach($spuds_to_parse_now as $spud) {
-			$this->makeFries($spud);
-		}
-		
+		$this->header_content = $oauth;
+	}
+	
+	function getHeader() {
+		$url_parts = parse_url($this->url);
+	    $header = 'OAuth realm="' . $url_parts['scheme'] . '://' . $url_parts['host'] . $url_parts['path'] . '",';
+	    foreach($this->header_content as $name => $value) {
+	      $header .= "{$name}=\"{$value}\",";
+	    }
+		// trim off the last comma
+	    $header = substr($header, 0, -1);
+		clAPI::debug("oAuth Authorization Header: ".$header);
+		return $header;
+	}
+	
+	private function sign_string($string) {
+		$retval = FALSE;
+	    switch($this->signature_method) {
+	      	case 'HMAC-SHA1':
+	        	$key = self::encode_rfc3986($this->consumer_secret) . '&' . self::encode_rfc3986($this->access_token_secret);
+	        	$retval = base64_encode(hash_hmac('sha1', $string, $key, TRUE));
+	        	break;
+			default:
+				throw new Exception("coreylib does not support signing oAuth requests with signature method {$this->signature_method}");
+				break;
+	    }
 
-		// wait for curl to finish
-		if ($running > 0) {
-			do {
-				curl_multi_exec($mh, $running);
-			} while ($running > 0);
-		}
-		
-		foreach($curl_handles as $i => $ch) {
-			$key = md5($i.curl_getinfo($ch, CURLINFO_EFFECTIVE_URL));
-			$content = curl_multi_getcontent($ch);
-			$spud = $queued_spuds[$key];
-			$spud->api()->parseText($content, false);
-			$this->makeFries($spud);
-		}
+	    return $retval;
 	}
 	
-	private function makeFries(clSpud $spud) {
-		if ($items_at = $spud->getItemsAt()) {
-			foreach($spud->api()->get($items_at) as $node) {
-				$this->fries[] = new clFry($spud, $node);
-			}
-		}
+	static function encode_rfc3986($string) {
+	    return str_replace('+', ' ', str_replace('%7E', '~', rawurlencode(($string))));
 	}
 	
-	function sort($order = 'descending', $type = MASHUP_SORT_DATE) {
-		$arr = array();
-	
-		foreach($this->fries as $fry) {
-			if ($sort_by = $fry->spud->getSortOn()) {
-				$key = ''.$fry->get($sort_by);
-				if ($type == MASHUP_SORT_DATE)
-					$key = date('c', strtotime($key));
-				
-				while(isset($arr[$key]))
-					$key .= 'a';
-				$arr[$key] = $fry;
-			}
-			else {
-				$key = 0;
-				while (isset($arr[$key]))
-					$key .= 'a';
-				$arr[$key] = $fry;
-			}
-		}
-		
-		if (preg_match('/desc.*/i', $order))
-			krsort($arr);
-		else
-			ksort($arr);
-		
-		$this->fries = array();
-	
-		$keys = array_keys($arr);
-		for($i=0; $i<count($keys); $i++)
-			$this->fries[] = $arr[$keys[$i]];
+	static function build_http_query_raw($params) {
+		$retval = '';
+	    foreach((array) $params as $key => $value)
+	      	$retval .= "{$key}={$value}&";
+	    $retval = substr($retval, 0, -1);
+	    return $retval;
 	}
 
-	private $i = 0;
+	static function normalize_url($url = null) {
+	    $url_parts = parse_url($url);
+	    $scheme = strtolower($url_parts['scheme']);
+	    $host   = strtolower($url_parts['host']);
+	    $port = isset($url_parts['port']) ? intval($url_parts['port']) : 0;
 
-	private $limit = null;
+	    $retval = strtolower($scheme) . '://' . strtolower($host);
 
-	function limit($limit) {
-		$this->limit = $limit;
-		return $this;
-	}
-	
-	function clearLimit() {
-		$this->limit = null;
-		return $this;
-	}
+	    if (!empty($port) && (($scheme === 'http' && $port != 80) || ($scheme === 'https' && $port != 443)))
+	      	$retval .= ":{$port}";
 
-	function current() {
-		return $this->fries[$this->i];
+	    $retval .= $url_parts['path'];
+	    if (!empty($url_parts['query']))
+	     	$retval .= "?{$url_parts['query']}";
+	   
+	    return $retval;
 	}
 	
-	function key() {
-		return $this->i;
-	}
-	
-	function next() {
-		$this->i++;
-	}
-	
-	function rewind() {
-		$this->i = 0;
-	}
-	
-	function valid() {
-		return ($this->limit == null || ($this->i < $this->limit)) && isset($this->fries[$this->i]);
-	}
-	
-	function offsetExists($offset) {
-		return isset($this->fries[$offset]);
-	}
-	
-	function offsetGet($offset) {
-		return $this->fries[$offset];
-	}
-	
-	function offsetSet($offset, $value) {
-		throw new Exception("Mashups are read-only.");
-	}
-	
-	function offsetUnset($offset) {
-		throw new Exception("Mashups are read-only.");
-	}
-	
-} // end clMashup
-
-class clFry {
-	
-	public $spud;
-
-	public $api;
-	
-	public $node;
-	
-	public $source;
-	
-	function __construct(clSpud $spud, clNode $node) {
-		$this->source = $spud->source();
-		$this->api = $spud->api();
-		$this->spud = $spud;
-		$this->node = $node;
-	}	
-	
-	function get($path = null) {
-		return $this->node->get($path);
-	}
-	
-	function has($path = null) {
-		return $this->node->has($path);
-	}
-	
-	function info($path = null) {
-		return $this->node->info($path);
-	}
-	
-}
-
-class clSpud {
-	
-	private $api;
-	
-	private $source;
-	
-	private $sort_by;
-	
-	private $items_at;
-	
-	function __construct($source, clAPI $api, $items_at = null, $sort_by = null) {
-		$this->source = $source;
-		$this->api = $api;
-		$this->items_at = $items_at;
-		$this->sort_by = $sort_by;
-	}
-	
-	function source() {
-		return $this->source;
-	}
-	
-	function api() {
-		return $this->api;
-	}
-	
-	function sort_by($sort_by) {
-		$this->sort_by = $sort_by;
-		return $this;
-	}
-	
-	function items_at($items_at) {
-		$this->items_at = $items_at;
-		return $this;
-	}
-
-	function getItemsAt() {
-		return $this->items_at;
-	}
-	
-	function getSortOn() {
-		return $this->sort_by;
-	}
-
 }
 	
 /**
@@ -391,6 +269,13 @@ class clAPI {
 	
 	protected $password;
 	
+	protected $consumserKey;
+	protected $consumerSecret;
+	protected $accessToken;
+	protected $accessTokenSecret;
+	
+	protected $headers;
+	
 	protected $content;
 	
 	protected $parserType;
@@ -424,6 +309,8 @@ class clAPI {
 	);
 	
 	function __construct($url, $parserType = COREYLIB_PARSER_XML) {
+		$this->header('Expect', '');
+		
 		if (clAPI::$options['debug'] || clAPI::$options['display_errors']) {
 			error_reporting(E_ALL);
 			ini_set('display_errors', true);
@@ -510,9 +397,31 @@ class clAPI {
 		}
 	}
 	
+	/**
+	 * @since 1.1.5
+	 */
 	function basicAuth($username, $password) {
 		$this->username = $username;
 		$this->password = $password;
+		return $this;
+	}
+	
+	/**
+	 * @since 1.1.5
+	 */
+	function oAuth($consumerKey, $consumerSecret, $accessToken, $accessTokenSecret) {
+		$this->consumerKey = $consumerKey;
+		$this->consumerSecret = $consumerSecret;
+		$this->accessToken = $accessToken;
+		$this->accessTokenSecret = $accessTokenSecret;
+		return $this;
+	}
+	
+	/**
+	 * @since 1.1.5
+	 */
+	function header($name, $value) {
+		$this->headers[$name] = $value;
 		return $this;
 	}
 	
@@ -550,7 +459,28 @@ class clAPI {
 			curl_setopt($this->ch, CURLOPT_USERPWD, "$this->username:$this->password");
 		}
 		
-		curl_setopt($this->ch, CURLOPT_HTTPHEADER, array('Expect:'));
+		if ($this->consumerKey && $this->consumerSecret && $this->accessToken && $this->accessTokenSecret) {
+			
+			$oauth = new oAuthSupport(
+				$this->url,
+				$this->consumerKey, 
+				$this->consumerSecret, 
+				$this->accessToken, 
+				$this->accessTokenSecret,
+				$this->params,
+				strtoupper($this->method)
+			);
+			
+			$this->header('Authorization', $oauth->getHeader());
+		}
+		
+		// set headers
+		$headers = array();
+		foreach($this->headers as $name => $value) {
+			$headers[] = "{$name}: {$value}";
+		}
+		
+		curl_setopt($this->ch, CURLOPT_HTTPHEADER, $headers);
 		
 		if ($this->method == self::METHOD_POST) {
 			curl_setopt($this->ch, CURLOPT_POST, true);
@@ -584,7 +514,7 @@ class clAPI {
 		
 		$qs = $this->queryString();
 		$url = $this->url.($qs ? '?'.$qs : '');
-		$this->cacheName = $url.md5($this->username.$this->password);
+		$this->cacheName = $url.md5($this->username.$this->password).md5($this->consumerKey.$this->accessToken);
 		
 		$contentCameFromCache = false;
 		
@@ -1476,4 +1406,254 @@ if (!function_exists('save')) {
 	function save() {
 		clCache::save();
 	}
+}
+
+class clMashup implements ArrayAccess, Iterator {
+	
+	private $spuds = array();
+	
+	private $fries = array();
+	
+	function __construct($items_at = null, $sort_by = null, $urls = array()) {
+		foreach($urls as $i => $url) {
+			$spud = new clSpud($i, new clAPI($url), $items_at, $sort_by);
+			$this->spuds[] = $spud;
+		}
+	}
+	
+	function add($source, clAPI $api, $items_at = null, $sort_by = null) {
+		$spud = new clSpud($source, $api, $items_at, $sort_by);
+		$this->spuds[] = $spud;
+		return $spud;
+	}
+	
+	function info() {
+		foreach($this->spuds as $s) 
+			$s->api()->info();
+	}
+	
+	function count() {
+		return count($this->fries);
+	}
+	
+	function parse($cacheFor = 0) {
+		$success = true;
+
+		$mh = curl_multi_init();
+		
+		$spuds_to_parse_now = array();
+		$curl_handles = array();
+		$queued_spuds = array();
+		
+		foreach($this->spuds as $i => $spud) {
+			$from_parser = $spud->api()->queue($cacheFor);
+			if (!is_string($from_parser)) {
+				// store reference to spud for later parsing
+				$url = curl_getinfo($from_parser, CURLINFO_EFFECTIVE_URL);
+				$key = md5($i.$url);
+				$queued_spuds[$key] = $spud;
+				$curl_handles[$i] = $from_parser;
+				
+				// queue in multi handle
+				curl_multi_add_handle($mh, $from_parser);
+			}
+			else {
+				$spud->api()->parseText($from_parser, true);
+				$spuds_to_parse_now[] = $spud;
+			}
+		}
+		
+		// go, go gadget, multi-curl!
+		$running = count($curl_handles);
+		curl_multi_exec($mh, $running); // doesn't block
+		
+		// before we start waiting for queued curl requests, parse the one's we had cached content for
+		foreach($spuds_to_parse_now as $spud) {
+			$this->makeFries($spud);
+		}
+		
+
+		// wait for curl to finish
+		if ($running > 0) {
+			do {
+				curl_multi_exec($mh, $running);
+			} while ($running > 0);
+		}
+		
+		foreach($curl_handles as $i => $ch) {
+			$key = md5($i.curl_getinfo($ch, CURLINFO_EFFECTIVE_URL));
+			$content = curl_multi_getcontent($ch);
+			$spud = $queued_spuds[$key];
+			$spud->api()->parseText($content, false);
+			$this->makeFries($spud);
+		}
+	}
+	
+	private function makeFries(clSpud $spud) {
+		if ($items_at = $spud->getItemsAt()) {
+			foreach($spud->api()->get($items_at) as $node) {
+				$this->fries[] = new clFry($spud, $node);
+			}
+		}
+	}
+	
+	function sort($order = 'descending', $type = MASHUP_SORT_DATE) {
+		$arr = array();
+	
+		foreach($this->fries as $fry) {
+			if ($sort_by = $fry->spud->getSortOn()) {
+				$key = ''.$fry->get($sort_by);
+				if ($type == MASHUP_SORT_DATE)
+					$key = date('c', strtotime($key));
+				
+				while(isset($arr[$key]))
+					$key .= 'a';
+				$arr[$key] = $fry;
+			}
+			else {
+				$key = 0;
+				while (isset($arr[$key]))
+					$key .= 'a';
+				$arr[$key] = $fry;
+			}
+		}
+		
+		if (preg_match('/desc.*/i', $order))
+			krsort($arr);
+		else
+			ksort($arr);
+		
+		$this->fries = array();
+	
+		$keys = array_keys($arr);
+		for($i=0; $i<count($keys); $i++)
+			$this->fries[] = $arr[$keys[$i]];
+	}
+
+	private $i = 0;
+
+	private $limit = null;
+
+	function limit($limit) {
+		$this->limit = $limit;
+		return $this;
+	}
+	
+	function clearLimit() {
+		$this->limit = null;
+		return $this;
+	}
+
+	function current() {
+		return $this->fries[$this->i];
+	}
+	
+	function key() {
+		return $this->i;
+	}
+	
+	function next() {
+		$this->i++;
+	}
+	
+	function rewind() {
+		$this->i = 0;
+	}
+	
+	function valid() {
+		return ($this->limit == null || ($this->i < $this->limit)) && isset($this->fries[$this->i]);
+	}
+	
+	function offsetExists($offset) {
+		return isset($this->fries[$offset]);
+	}
+	
+	function offsetGet($offset) {
+		return $this->fries[$offset];
+	}
+	
+	function offsetSet($offset, $value) {
+		throw new Exception("Mashups are read-only.");
+	}
+	
+	function offsetUnset($offset) {
+		throw new Exception("Mashups are read-only.");
+	}
+	
+} // end clMashup
+
+class clFry {
+	
+	public $spud;
+
+	public $api;
+	
+	public $node;
+	
+	public $source;
+	
+	function __construct(clSpud $spud, clNode $node) {
+		$this->source = $spud->source();
+		$this->api = $spud->api();
+		$this->spud = $spud;
+		$this->node = $node;
+	}	
+	
+	function get($path = null) {
+		return $this->node->get($path);
+	}
+	
+	function has($path = null) {
+		return $this->node->has($path);
+	}
+	
+	function info($path = null) {
+		return $this->node->info($path);
+	}
+	
+}
+
+class clSpud {
+	
+	private $api;
+	
+	private $source;
+	
+	private $sort_by;
+	
+	private $items_at;
+	
+	function __construct($source, clAPI $api, $items_at = null, $sort_by = null) {
+		$this->source = $source;
+		$this->api = $api;
+		$this->items_at = $items_at;
+		$this->sort_by = $sort_by;
+	}
+	
+	function source() {
+		return $this->source;
+	}
+	
+	function api() {
+		return $this->api;
+	}
+	
+	function sort_by($sort_by) {
+		$this->sort_by = $sort_by;
+		return $this;
+	}
+	
+	function items_at($items_at) {
+		$this->items_at = $items_at;
+		return $this;
+	}
+
+	function getItemsAt() {
+		return $this->items_at;
+	}
+	
+	function getSortOn() {
+		return $this->sort_by;
+	}
+
 }
